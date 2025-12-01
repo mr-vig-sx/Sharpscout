@@ -324,7 +324,7 @@ def get_all_positions():
     
     return get_all_positions_cached(wallets)
 
-@st.cache_data(ttl=300)  # Cache positions for 5 minutes
+@st.cache_data(ttl=60)  # Cache positions for 1 minute (shorter to catch resolved markets faster)
 def get_all_positions_cached(wallets_list):
     """Fetch and aggregate positions from all wallets (cached)"""
     wallets = wallets_list
@@ -368,7 +368,8 @@ def get_all_positions_cached(wallets_list):
                 markets_dict[market_name] = {
                     'date': market_data.get('date'),
                     'wallets': {},
-                    'market_info': None  # Will store market info for price checking
+                    'market_info': None,  # Will store market info for price checking
+                    'condition_id': None  # Store condition_id for price fetching
                 }
             
             outcome_positions = {}
@@ -381,11 +382,12 @@ def get_all_positions_cached(wallets_list):
                 best_outcome = max(outcome_positions.items(), key=lambda x: x[1]['total_cost'])
                 markets_dict[market_name]['wallets'][wallet_label] = best_outcome[1]
                 
-                # Store market info for price checking (use first trade's condition_id)
+                # Store condition_id and fetch market info for price checking
                 if not markets_dict[market_name]['market_info'] and market_data['outcomes']:
                     first_trade = list(market_data['outcomes'].values())[0][0]
                     condition_id = first_trade.get('condition_id')
                     if condition_id:
+                        markets_dict[market_name]['condition_id'] = condition_id
                         markets_dict[market_name]['market_info'] = fetch_market_info(condition_id)
     
     # Convert to list format and filter by date
@@ -411,16 +413,54 @@ def get_all_positions_cached(wallets_list):
         wallet_positions = market_data.get('wallets', {})
         market_date_str = market_data.get('date')
         market_info = market_data.get('market_info', {})
+        condition_id = market_data.get('condition_id')
         
         # Check if market is resolved based on prices
         is_resolved = False
-        if market_info and market_info.get('prices'):
+        
+        # If we don't have market_info yet, try to fetch it
+        if not market_info and condition_id:
+            market_info = fetch_market_info(condition_id)
+            market_data['market_info'] = market_info
+        
+        if market_info:
             prices = market_info.get('prices', {})
-            # If any outcome price is < 0.01 or > 0.99, market is resolved
-            for outcome_name, price in prices.items():
-                if price < 0.01 or price > 0.99:
-                    is_resolved = True
-                    break
+            # If we have prices, check if any outcome price indicates resolution
+            if prices:
+                # If any outcome price is < 0.01 or > 0.99, market is resolved
+                for outcome_name, price in prices.items():
+                    try:
+                        price_float = float(price)
+                        if price_float < 0.01 or price_float > 0.99:
+                            is_resolved = True
+                            break
+                    except (ValueError, TypeError):
+                        continue
+        
+        # If still no prices, try direct markets API call as fallback
+        if not is_resolved and condition_id and (not market_info or not market_info.get('prices')):
+            try:
+                url = "https://data-api.polymarket.com/markets"
+                params = {'conditionId': condition_id}
+                response = requests.get(url, params=params, timeout=3)
+                if response.status_code == 200:
+                    data = response.json()
+                    markets = data if isinstance(data, list) else (data.get('data', []) if isinstance(data, dict) else [])
+                    if markets:
+                        market = markets[0]
+                        if 'tokens' in market:
+                            for token in market['tokens']:
+                                price = token.get('price') or token.get('lastPrice') or token.get('currentPrice')
+                                if price is not None:
+                                    try:
+                                        price_float = float(price)
+                                        if price_float < 0.01 or price_float > 0.99:
+                                            is_resolved = True
+                                            break
+                                    except (ValueError, TypeError):
+                                        continue
+            except Exception:
+                pass
         
         # Also check date as backup filter
         include_market = not is_resolved
@@ -441,6 +481,9 @@ def get_all_positions_cached(wallets_list):
     for market in markets_list:
         total_wager = sum(pos['total_cost'] for pos in market['wallets'].values())
         market['total_wager'] = total_wager
+    
+    # Sort: First by wallet_count (descending), then by total_wager (descending)
+    markets_list.sort(key=lambda x: (-x['wallet_count'], -x['total_wager']))
     
     return markets_list
 
@@ -510,18 +553,14 @@ with st.sidebar:
 if not st.session_state.wallets:
     st.info("👈 Add wallet addresses in the sidebar to start scouting trades")
 else:
-    # Sort options
-    sort_option = st.selectbox(
-        "Sort by:",
-        ["Most Wallets (2/3 or 3/3)", "Total Wager (High to Low)", "Total Wager (Low to High)", "Market Name (A-Z)"],
-        key="sort_option"
-    )
-    
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("🔄 Refresh Positions", use_container_width=True):
+            # Clear all caches
             if 'market_cache' in st.session_state:
                 st.session_state.market_cache.clear()
+            # Clear Streamlit cache
+            st.cache_data.clear()
             st.rerun()
     
     with col2:
@@ -562,16 +601,7 @@ else:
     if not positions:
         st.info("No positions found. Make sure wallets have trades and click Refresh Positions.")
     else:
-        # Sort positions based on selected option
-        if sort_option == "Most Wallets (2/3 or 3/3)":
-            positions.sort(key=lambda x: (-x['wallet_count'], x['market_name']))
-        elif sort_option == "Total Wager (High to Low)":
-            positions.sort(key=lambda x: (-x.get('total_wager', 0), x['market_name']))
-        elif sort_option == "Total Wager (Low to High)":
-            positions.sort(key=lambda x: (x.get('total_wager', 0), x['market_name']))
-        elif sort_option == "Market Name (A-Z)":
-            positions.sort(key=lambda x: x['market_name'])
-        
+        # Positions are already sorted by wallet_count then total_wager in get_all_positions_cached
         # Get all wallet labels
         all_wallet_labels = set()
         for market in positions:
@@ -647,6 +677,7 @@ else:
                     if highlight_style:
                         st.markdown('</div>', unsafe_allow_html=True)
                     st.divider()
+
 
 
 
