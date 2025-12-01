@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SharpScout - Polymarket Trade Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0a0e27;
+            color: #e0e0e0;
+            line-height: 1.6;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #00d4ff;
+        }
+
+        h1 {
+            color: #00d4ff;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 1.1em;
+        }
+
+        .wallet-section {
+            background: #151932;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 30px;
+            border: 1px solid #1e2442;
+        }
+
+        .wallet-section h2 {
+            color: #00d4ff;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+        }
+
+        .wallet-input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .wallet-input {
+            flex: 1;
+            padding: 12px;
+            background: #0a0e27;
+            border: 1px solid #1e2442;
+            border-radius: 6px;
+            color: #e0e0e0;
+            font-size: 14px;
+        }
+
+        .wallet-input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: #00d4ff;
+            color: #0a0e27;
+        }
+
+        .btn-primary:hover {
+            background: #00b8e6;
+            transform: translateY(-2px);
+        }
+
+        .btn-secondary {
+            background: #1e2442;
+            color: #00d4ff;
+            border: 1px solid #00d4ff;
+        }
+
+        .btn-secondary:hover {
+            background: #00d4ff;
+            color: #0a0e27;
+        }
+
+        .btn-danger {
+            background: #d32f2f;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #b71c1c;
+        }
+
+        .wallet-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .wallet-tag {
+            background: #1e2442;
+            padding: 8px 16px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid #2a3152;
+        }
+
+        .wallet-address {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: #00d4ff;
+        }
+
+        .remove-wallet {
+            background: transparent;
+            border: none;
+            color: #ff5252;
+            cursor: pointer;
+            font-size: 18px;
+            padding: 0;
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .remove-wallet:hover {
+            color: #ff1744;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .trades-section {
+            background: #151932;
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid #1e2442;
+        }
+
+        .trades-section h2 {
+            color: #00d4ff;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #888;
+        }
+
+        .error {
+            background: #d32f2f;
+            color: white;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+
+        .trades-table {
+            width: 100%;
+            border-collapse: collapse;
+            overflow-x: auto;
+            display: block;
+        }
+
+        .trades-table thead {
+            background: #1e2442;
+        }
+
+        .trades-table th {
+            padding: 12px;
+            text-align: left;
+            color: #00d4ff;
+            font-weight: 600;
+            border-bottom: 2px solid #00d4ff;
+            position: sticky;
+            top: 0;
+        }
+
+        .trades-table td {
+            padding: 12px;
+            border-bottom: 1px solid #1e2442;
+        }
+
+        .trades-table tbody tr:hover {
+            background: #1e2442;
+        }
+
+        .trades-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .highlight-2 {
+            background: rgba(255, 193, 7, 0.2) !important;
+            border-left: 3px solid #ffc107;
+        }
+
+        .highlight-3 {
+            background: rgba(76, 175, 80, 0.2) !important;
+            border-left: 3px solid #4caf50;
+        }
+
+        .highlight-2:hover,
+        .highlight-3:hover {
+            background: rgba(255, 193, 7, 0.3) !important;
+        }
+
+        .highlight-3:hover {
+            background: rgba(76, 175, 80, 0.3) !important;
+        }
+
+        .wallet-column {
+            vertical-align: top;
+        }
+
+        .trade-entry {
+            margin-bottom: 8px;
+            padding: 6px;
+            background: #1e2442;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .trade-entry:last-child {
+            margin-bottom: 0;
+        }
+
+        .trade-outcome {
+            color: #00d4ff;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .trade-details {
+            color: #aaa;
+            font-size: 11px;
+        }
+
+        .wallet-badge {
+            display: inline-block;
+            background: #1e2442;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #00d4ff;
+            font-family: 'Courier New', monospace;
+        }
+
+        .positive {
+            color: #4caf50;
+        }
+
+        .negative {
+            color: #f44336;
+        }
+
+        .no-trades {
+            text-align: center;
+            padding: 40px;
+            color: #888;
+        }
+
+        @media (max-width: 768px) {
+            .wallet-input-group {
+                flex-direction: column;
+            }
+
+            .trades-table {
+                font-size: 12px;
+            }
+
+            .trades-table th,
+            .trades-table td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>SharpScout</h1>
+            <p class="subtitle">Polymarket Trade Scouting Dashboard</p>
+        </header>
+
+        <div class="wallet-section">
+            <h2>Wallet Addresses</h2>
+            <div class="wallet-input-group">
+                <input type="text" 
+                       id="walletLabelInput" 
+                       class="wallet-input" 
+                       placeholder="Label (e.g., Freedom)"
+                       style="max-width: 200px;">
+                <input type="text" 
+                       id="walletInput" 
+                       class="wallet-input" 
+                       placeholder="Enter wallet address (0x...)"
+                       maxlength="42">
+                <button class="btn btn-primary" onclick="addWallet()">Add Wallet</button>
+            </div>
+            <div id="walletList" class="wallet-list"></div>
+        </div>
+
+        <div class="trades-section">
+            <h2>Recent Trades</h2>
+            <div class="controls">
+                <button class="btn btn-secondary" onclick="loadTrades()">Refresh Trades</button>
+                <button class="btn btn-secondary" onclick="exportCSV()">Export CSV</button>
+                <button class="btn btn-secondary" onclick="backupWallets()">Backup Wallets</button>
+            </div>
+            <div id="errorMessage"></div>
+            <div id="tradesContainer">
+                <div class="loading">Loading trades...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allTrades = [];
+
+        // Load wallets and trades on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            loadWallets();
+            loadTrades();
+        });
+
+        async function loadWallets() {
+            try {
+                const response = await fetch('/api/wallets');
+                const wallets = await response.json();
+                displayWallets(wallets);
+            } catch (error) {
+                console.error('Error loading wallets:', error);
+            }
+        }
+
+        function displayWallets(wallets) {
+            const walletList = document.getElementById('walletList');
+            if (wallets.length === 0) {
+                walletList.innerHTML = '<p style="color: #888;">No wallets added yet. Add a wallet address to start scouting trades.</p>';
+                return;
+            }
+
+            walletList.innerHTML = wallets.map(wallet => {
+                const address = typeof wallet === 'string' ? wallet : wallet.address;
+                const label = typeof wallet === 'object' && wallet.label ? wallet.label : '';
+                const displayText = label ? `${label}: ${address.substring(0, 10)}...` : address.substring(0, 10) + '...';
+                return `
+                    <div class="wallet-tag">
+                        <span class="wallet-address">${displayText}</span>
+                        <button class="remove-wallet" onclick="removeWallet('${address}')" title="Remove wallet">×</button>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function addWallet() {
+            const addressInput = document.getElementById('walletInput');
+            const labelInput = document.getElementById('walletLabelInput');
+            const address = addressInput.value.trim();
+            const label = labelInput.value.trim();
+
+            if (!address) {
+                showError('Please enter a wallet address');
+                return;
+            }
+
+            if (!address.startsWith('0x') || address.length !== 42) {
+                showError('Invalid wallet address format. Must start with 0x and be 42 characters long.');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/wallets', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ address: address, label: label })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    addressInput.value = '';
+                    labelInput.value = '';
+                    displayWallets(data.wallets);
+                    loadTrades();
+                    clearError();
+                } else {
+                    showError(data.error || 'Failed to add wallet');
+                }
+            } catch (error) {
+                showError('Error adding wallet: ' + error.message);
+            }
+        }
+
+        async function removeWallet(wallet) {
+            if (!confirm(`Remove wallet ${wallet}?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/wallets/${wallet}`, {
+                    method: 'DELETE'
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    displayWallets(data.wallets);
+                    loadTrades();
+                } else {
+                    showError('Failed to remove wallet');
+                }
+            } catch (error) {
+                showError('Error removing wallet: ' + error.message);
+            }
+        }
+
+        let walletLabels = [];
+        let totalWallets = 0;
+
+        async function loadTrades() {
+            const container = document.getElementById('tradesContainer');
+            container.innerHTML = '<div class="loading">Loading trades...</div>';
+
+            try {
+                const response = await fetch('/api/trades');
+                const data = await response.json();
+                
+                // Get wallet labels from wallets API
+                const walletsResponse = await fetch('/api/wallets');
+                const wallets = await walletsResponse.json();
+                walletLabels = wallets.map(w => typeof w === 'object' ? (w.label || w.address.substring(0, 10)) : w.substring(0, 10));
+                totalWallets = walletLabels.length;
+                
+                allTrades = data;
+                displayTrades(data);
+                clearError();
+            } catch (error) {
+                container.innerHTML = `<div class="error">Error loading trades: ${error.message}</div>`;
+            }
+        }
+
+        function displayTrades(data) {
+            const container = document.getElementById('tradesContainer');
+
+            if (!data.markets || data.markets.length === 0) {
+                container.innerHTML = '<div class="no-trades">No trades found. Add wallet addresses and wait for trades to appear.</div>';
+                return;
+            }
+
+            const markets = data.markets;
+            const wallets = data.wallets || {};
+            
+            // Get all unique wallet labels from the data
+            const allWalletLabels = new Set();
+            markets.forEach(market => {
+                Object.keys(market.wallets || {}).forEach(label => allWalletLabels.add(label));
+            });
+            const sortedWalletLabels = Array.from(allWalletLabels).sort();
+            
+            // Determine highlight class based on wallet count
+            // Highlight when 2/3 or 3/3 wallets have trades (or 2+ if more wallets)
+            const getHighlightClass = (walletCount) => {
+                if (totalWallets >= 3) {
+                    if (walletCount >= 3) {
+                        return 'highlight-3'; // All 3 wallets
+                    } else if (walletCount >= 2) {
+                        return 'highlight-2'; // 2 out of 3 wallets
+                    }
+                } else if (totalWallets >= 2 && walletCount >= 2) {
+                    return 'highlight-2'; // 2 out of 2 wallets
+                }
+                return '';
+            };
+
+            // Build table rows
+            const tableRows = markets.map(market => {
+                const highlightClass = getHighlightClass(market.wallet_count);
+                const walletCells = sortedWalletLabels.map(walletLabel => {
+                    const position = market.wallets[walletLabel];
+                    if (!position) {
+                        return '<td class="wallet-column">-</td>';
+                    }
+                    
+                    // Display consolidated position
+                    const outcome = position.outcome || 'N/A';
+                    const totalShares = formatAmount(position.total_shares || 0);
+                    const avgCost = formatPrice(position.avg_cost_per_share || 0);
+                    const totalCost = formatPrice(position.total_cost || 0);
+                    const tradeCount = position.trade_count || 0;
+                    
+                    return '<td class="wallet-column">' +
+                        '<div class="trade-entry">' +
+                        '<div class="trade-outcome">' + outcome + '</div>' +
+                        '<div class="trade-details">' +
+                        'Shares: ' + totalShares + '<br>' +
+                        'Avg Cost: $' + avgCost + '<br>' +
+                        'Total Cost: $' + totalCost + '<br>' +
+                        '<span style="font-size: 10px; color: #888;">(' + tradeCount + ' trades)</span>' +
+                        '</div>' +
+                        '</div>' +
+                        '</td>';
+                }).join('');
+                
+                return '<tr class="' + highlightClass + '"><td><strong>' + market.market_name + '</strong></td>' + walletCells + '</tr>';
+            }).join('');
+
+            const headerRow = '<tr><th style="min-width: 300px;">Market Name</th>' +
+                sortedWalletLabels.map(label => '<th class="wallet-column">' + label + '</th>').join('') +
+                '</tr>';
+
+            const table = '<table class="trades-table">' +
+                '<thead>' + headerRow + '</thead>' +
+                '<tbody>' + tableRows + '</tbody>' +
+                '</table>';
+
+            container.innerHTML = table;
+        }
+
+        function formatPrice(price) {
+            if (!price) return 'N/A';
+            return parseFloat(price).toFixed(4);
+        }
+
+        function formatAmount(amount) {
+            if (!amount) return 'N/A';
+            return parseFloat(amount).toFixed(4);
+        }
+
+        function formatTimestamp(timestamp) {
+            if (!timestamp) return 'N/A';
+            // Handle both Unix timestamp (seconds) and ISO strings
+            let date;
+            if (typeof timestamp === 'string') {
+                date = new Date(timestamp);
+            } else {
+                // If timestamp is in milliseconds, use directly; if in seconds, multiply by 1000
+                date = new Date(timestamp > 1e12 ? timestamp : timestamp * 1000);
+            }
+            return date.toLocaleString();
+        }
+
+        function exportCSV() {
+            if (!allTrades.markets || allTrades.markets.length === 0) {
+                showError('No positions to export');
+                return;
+            }
+
+            const headers = ['Market Name', 'Wallet Label', 'Outcome', 'Position Type', 'Total Shares', 'Avg Cost Per Share', 'Total Cost', 'Trade Count'];
+            const rows = [];
+            
+            allTrades.markets.forEach(market => {
+                Object.keys(market.wallets || {}).forEach(walletLabel => {
+                    const position = market.wallets[walletLabel];
+                    if (position) {
+                        rows.push([
+                            market.market_name || '',
+                            walletLabel || '',
+                            position.outcome || '',
+                            position.position_type || '',
+                            position.total_shares || 0,
+                            position.avg_cost_per_share || 0,
+                            position.total_cost || 0,
+                            position.trade_count || 0
+                        ]);
+                    }
+                });
+            });
+
+            const csv = [
+                headers.join(','),
+                ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+            ].join('\n');
+
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `polymarket_positions_${new Date().toISOString().split('T')[0]}.csv`;
+            a.click();
+            window.URL.revokeObjectURL(url);
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.innerHTML = `<div class="error">${message}</div>`;
+        }
+
+        function clearError() {
+            document.getElementById('errorMessage').innerHTML = '';
+        }
+
+        function backupWallets() {
+            // Download wallets.json as backup
+            window.location.href = '/api/backup';
+        }
+
+        // Allow Enter key to add wallet
+        document.getElementById('walletInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                addWallet();
+            }
+        });
+        document.getElementById('walletLabelInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                document.getElementById('walletInput').focus();
+            }
+        });
+    </script>
+</body>
+</html>
+
