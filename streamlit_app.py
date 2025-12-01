@@ -99,24 +99,21 @@ def save_wallets(wallets):
         json.dump(wallets, f, indent=2)
     st.session_state.wallets = wallets
 
-def fetch_market_info(condition_id):
-    """Fetch market name and event date from Polymarket API using condition ID"""
+@st.cache_data(ttl=300)  # Cache for 5 minutes (shorter for price data)
+def fetch_market_info_cached(condition_id):
+    """Fetch market name, event date, and current prices from Polymarket API (cached)"""
     if not condition_id:
-        return {'name': 'Unknown Market', 'date': None}
-    
-    # Check cache first
-    cache_key = f"{condition_id}_info"
-    if cache_key in st.session_state.market_cache:
-        return st.session_state.market_cache[cache_key]
+        return {'name': 'Unknown Market', 'date': None, 'prices': {}}
     
     market_name = None
     event_date = None
+    outcome_prices = {}
     
-    # Try Data API first
+    # Try Data API first (faster)
     try:
         url = "https://data-api.polymarket.com/events"
         params = {'conditionId': condition_id}
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(url, params=params, timeout=3)
         if response.status_code == 200:
             data = response.json()
             event_data = None
@@ -130,45 +127,83 @@ def fetch_market_info(condition_id):
             
             if event_data:
                 market_name = event_data.get('title') or event_data.get('question') or event_data.get('slug')
-                # Try to get event date
                 event_date = event_data.get('endDate') or event_data.get('startDate') or event_data.get('date') or event_data.get('eventDate')
+                
+                # Get outcome prices if available
+                if 'outcomes' in event_data:
+                    for outcome in event_data['outcomes']:
+                        outcome_name = outcome.get('title') or outcome.get('name')
+                        price = outcome.get('price') or outcome.get('lastPrice') or outcome.get('currentPrice')
+                        if outcome_name and price is not None:
+                            outcome_prices[outcome_name] = float(price)
             
             if market_name and market_name != 'Unknown Market':
-                result = {'name': market_name, 'date': event_date}
-                st.session_state.market_cache[cache_key] = result
-                return result
+                return {'name': market_name, 'date': event_date, 'prices': outcome_prices}
     except Exception:
         pass
     
-    # Try Gamma API
+    # Try to get prices from markets endpoint
     try:
-        url = f"https://gamma-api.polymarket.com/markets/{condition_id}"
-        response = requests.get(url, timeout=5)
+        url = f"https://data-api.polymarket.com/markets"
+        params = {'conditionId': condition_id}
+        response = requests.get(url, params=params, timeout=3)
         if response.status_code == 200:
             data = response.json()
-            if isinstance(data, dict):
-                market_name = data.get('question') or data.get('title') or data.get('slug')
-                event_date = data.get('endDate') or data.get('startDate') or data.get('endDateISO') or data.get('startDateISO')
-                if market_name and market_name != 'Unknown Market':
-                    result = {'name': market_name, 'date': event_date}
-                    st.session_state.market_cache[cache_key] = result
-                    return result
+            markets = data if isinstance(data, list) else (data.get('data', []) if isinstance(data, dict) else [])
+            if markets:
+                market = markets[0]
+                if not market_name:
+                    market_name = market.get('question') or market.get('title')
+                # Get outcome prices
+                if 'tokens' in market:
+                    for token in market['tokens']:
+                        outcome_name = token.get('outcome') or token.get('title')
+                        price = token.get('price') or token.get('lastPrice')
+                        if outcome_name and price is not None:
+                            outcome_prices[outcome_name] = float(price)
     except Exception:
         pass
     
     # Fallback to shortened condition_id
     short_id = condition_id[:16] + '...' if len(condition_id) > 16 else condition_id
-    result = {'name': short_id, 'date': None}
+    return {'name': short_id, 'date': None, 'prices': {}}
+
+def fetch_market_info(condition_id):
+    """Fetch market info with session cache layer"""
+    cache_key = f"{condition_id}_info"
+    if cache_key in st.session_state.market_cache:
+        return st.session_state.market_cache[cache_key]
+    
+    result = fetch_market_info_cached(condition_id)
     st.session_state.market_cache[cache_key] = result
     return result
+
+def is_market_resolved(market_info, outcome_name):
+    """Check if market is resolved based on outcome price"""
+    prices = market_info.get('prices', {})
+    if not prices:
+        return False  # Can't determine, so show it
+    
+    # Check if this specific outcome price indicates resolution
+    price = prices.get(outcome_name)
+    if price is None:
+        # Check all prices - if any outcome is < 0.01 or > 0.99, market is resolved
+        for outcome, outcome_price in prices.items():
+            if outcome_price < 0.01 or outcome_price > 0.99:
+                return True
+        return False
+    
+    # If this outcome's price is < 0.01 or > 0.99, it's resolved
+    return price < 0.01 or price > 0.99
 
 def fetch_market_name(condition_id):
     """Fetch market name (backward compatibility)"""
     info = fetch_market_info(condition_id)
     return info['name']
 
-def fetch_polymarket_trades(wallet_address):
-    """Fetch trades from Polymarket API for a given wallet address"""
+@st.cache_data(ttl=300)  # Cache trades for 5 minutes
+def fetch_polymarket_trades_cached(wallet_address):
+    """Fetch trades from Polymarket API (cached)"""
     try:
         url = "https://data-api.polymarket.com/trades"
         params = {
@@ -187,30 +222,47 @@ def fetch_polymarket_trades(wallet_address):
         elif isinstance(data, dict) and 'trades' in data:
             trades = data['trades']
         
-        # Enrich trades with market names and dates
-        for trade in trades:
-            condition_id = trade.get('conditionId') or trade.get('condition_id') or trade.get('market')
-            market_name = trade.get('marketName') or trade.get('market_name') or trade.get('question') or trade.get('title')
-            market_date = trade.get('eventDate') or trade.get('endDate') or trade.get('startDate')
-            
-            if condition_id:
-                trade['condition_id'] = condition_id
-                if not market_name or not market_date:
-                    market_info = fetch_market_info(condition_id)
-                    if not market_name:
-                        market_name = market_info['name']
-                    if not market_date:
-                        market_date = market_info['date']
-                trade['market_name'] = market_name
-                trade['market_date'] = market_date
-            elif market_name:
-                trade['market_name'] = market_name
-                trade['market_date'] = market_date
-        
         return trades
     except Exception as e:
-        st.error(f"Error fetching trades for {wallet_address}: {str(e)}")
         return []
+
+def fetch_polymarket_trades(wallet_address):
+    """Fetch trades and enrich with market info"""
+    trades = fetch_polymarket_trades_cached(wallet_address)
+    
+    if not trades:
+        return []
+    
+    # Batch fetch market info for unique condition IDs only
+    unique_condition_ids = set()
+    for trade in trades:
+        condition_id = trade.get('conditionId') or trade.get('condition_id') or trade.get('market')
+        if condition_id:
+            unique_condition_ids.add(condition_id)
+    
+    # Pre-fetch market info for all unique condition IDs
+    market_info_cache = {}
+    for condition_id in unique_condition_ids:
+        market_info_cache[condition_id] = fetch_market_info(condition_id)
+    
+    # Enrich trades with market names and dates
+    for trade in trades:
+        condition_id = trade.get('conditionId') or trade.get('condition_id') or trade.get('market')
+        market_name = trade.get('marketName') or trade.get('market_name') or trade.get('question') or trade.get('title')
+        market_date = trade.get('eventDate') or trade.get('endDate') or trade.get('startDate')
+        
+        if condition_id and condition_id in market_info_cache:
+            market_info = market_info_cache[condition_id]
+            if not market_name:
+                market_name = market_info['name']
+            if not market_date:
+                market_date = market_info['date']
+        
+        trade['condition_id'] = condition_id
+        trade['market_name'] = market_name or 'Unknown Market'
+        trade['market_date'] = market_date
+    
+    return trades
 
 def aggregate_position(trades):
     """Aggregate trades into a single position with avg cost and total cost"""
@@ -270,6 +322,15 @@ def get_all_positions():
     if not wallets:
         return []
     
+    return get_all_positions_cached(wallets)
+
+@st.cache_data(ttl=300)  # Cache positions for 5 minutes
+def get_all_positions_cached(wallets_list):
+    """Fetch and aggregate positions from all wallets (cached)"""
+    wallets = wallets_list
+    if not wallets:
+        return []
+    
     markets_dict = {}
     
     for wallet_obj in wallets:
@@ -304,7 +365,11 @@ def get_all_positions():
         # Aggregate positions for each market
         for market_name, market_data in market_outcome_trades.items():
             if market_name not in markets_dict:
-                markets_dict[market_name] = {'date': market_data.get('date'), 'wallets': {}}
+                markets_dict[market_name] = {
+                    'date': market_data.get('date'),
+                    'wallets': {},
+                    'market_info': None  # Will store market info for price checking
+                }
             
             outcome_positions = {}
             for outcome, trades_list in market_data['outcomes'].items():
@@ -315,36 +380,54 @@ def get_all_positions():
             if outcome_positions:
                 best_outcome = max(outcome_positions.items(), key=lambda x: x[1]['total_cost'])
                 markets_dict[market_name]['wallets'][wallet_label] = best_outcome[1]
+                
+                # Store market info for price checking (use first trade's condition_id)
+                if not markets_dict[market_name]['market_info'] and market_data['outcomes']:
+                    first_trade = list(market_data['outcomes'].values())[0][0]
+                    condition_id = first_trade.get('condition_id')
+                    if condition_id:
+                        markets_dict[market_name]['market_info'] = fetch_market_info(condition_id)
     
     # Convert to list format and filter by date
     markets_list = []
     today = datetime.now().date()
     
+    # Optimized date parsing function
+    def parse_date(date_str):
+        """Quick date parsing with caching"""
+        if not date_str:
+            return None
+        try:
+            if isinstance(date_str, (int, float)):
+                return datetime.fromtimestamp(date_str / 1000 if date_str > 1e10 else date_str).date()
+            date_str = str(date_str)
+            if 'T' in date_str:
+                return datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
+            return datetime.strptime(date_str[:10], '%Y-%m-%d').date()
+        except Exception:
+            return None
+    
     for market_name, market_data in markets_dict.items():
         wallet_positions = market_data.get('wallets', {})
         market_date_str = market_data.get('date')
+        market_info = market_data.get('market_info', {})
         
-        # Parse date and filter - only include today or future
-        include_market = True
-        if market_date_str:
-            try:
-                # Try parsing ISO format or common date formats
-                if isinstance(market_date_str, (int, float)):
-                    # Unix timestamp
-                    market_date = datetime.fromtimestamp(market_date_str / 1000 if market_date_str > 1e10 else market_date_str).date()
-                elif 'T' in str(market_date_str):
-                    # ISO format with time
-                    market_date = datetime.fromisoformat(str(market_date_str).replace('Z', '+00:00')).date()
-                else:
-                    # Try other formats
-                    market_date = datetime.strptime(str(market_date_str), '%Y-%m-%d').date()
-                
-                # Only include if date is today or later
-                if market_date < today:
-                    include_market = False
-            except Exception:
-                # If we can't parse the date, include it (better to show than hide)
-                pass
+        # Check if market is resolved based on prices
+        is_resolved = False
+        if market_info and market_info.get('prices'):
+            prices = market_info.get('prices', {})
+            # If any outcome price is < 0.01 or > 0.99, market is resolved
+            for outcome_name, price in prices.items():
+                if price < 0.01 or price > 0.99:
+                    is_resolved = True
+                    break
+        
+        # Also check date as backup filter
+        include_market = not is_resolved
+        if not is_resolved and market_date_str:
+            market_date = parse_date(market_date_str)
+            if market_date and market_date < today:
+                include_market = False
         
         if include_market:
             markets_list.append({
@@ -564,5 +647,6 @@ else:
                     if highlight_style:
                         st.markdown('</div>', unsafe_allow_html=True)
                     st.divider()
+
 
 
