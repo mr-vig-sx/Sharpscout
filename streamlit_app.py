@@ -67,7 +67,17 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # Initialize session state
 if 'wallets' not in st.session_state:
-    st.session_state.wallets = []
+    # Load wallets from file on first run
+    if os.path.exists(WALLETS_FILE):
+        with open(WALLETS_FILE, 'r') as f:
+            wallets_data = json.load(f)
+            # Convert old format (list of strings) to new format (list of dicts)
+            if wallets_data and isinstance(wallets_data[0], str):
+                st.session_state.wallets = [{'address': addr, 'label': ''} for addr in wallets_data]
+            else:
+                st.session_state.wallets = wallets_data
+    else:
+        st.session_state.wallets = []
 
 if 'market_cache' not in st.session_state:
     st.session_state.market_cache = {}
@@ -233,9 +243,7 @@ def aggregate_position(trades):
 
 def get_all_positions():
     """Fetch and aggregate positions from all wallets"""
-    wallets = st.session_state.wallets if st.session_state.wallets else load_wallets()
-    if not wallets:
-        return []
+    wallets = st.session_state.wallets if st.session_state.wallets else []
     if not wallets:
         return []
     
@@ -293,7 +301,11 @@ def get_all_positions():
             'wallet_count': len(wallet_positions)
         })
     
-    markets_list.sort(key=lambda x: (-x['wallet_count'], x['market_name']))
+    # Calculate total wager (sum of all wallet positions' total_cost) for each market
+    for market in markets_list:
+        total_wager = sum(pos['total_cost'] for pos in market['wallets'].values())
+        market['total_wager'] = total_wager
+    
     return markets_list
 
 # Main app
@@ -304,9 +316,7 @@ st.markdown("**Polymarket Trade Scouting Dashboard**")
 with st.sidebar:
     st.header("Wallet Management")
     
-    # Load wallets on first run
-    if not st.session_state.wallets:
-        st.session_state.wallets = load_wallets()
+    # Wallets are already loaded in session state initialization above
     
     # Add wallet form
     with st.form("add_wallet_form"):
@@ -364,6 +374,13 @@ with st.sidebar:
 if not st.session_state.wallets:
     st.info("👈 Add wallet addresses in the sidebar to start scouting trades")
 else:
+    # Sort options
+    sort_option = st.selectbox(
+        "Sort by:",
+        ["Most Wallets (2/3 or 3/3)", "Total Wager (High to Low)", "Total Wager (Low to High)", "Market Name (A-Z)"],
+        key="sort_option"
+    )
+    
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("🔄 Refresh Positions", use_container_width=True):
@@ -409,6 +426,16 @@ else:
     if not positions:
         st.info("No positions found. Make sure wallets have trades and click Refresh Positions.")
     else:
+        # Sort positions based on selected option
+        if sort_option == "Most Wallets (2/3 or 3/3)":
+            positions.sort(key=lambda x: (-x['wallet_count'], x['market_name']))
+        elif sort_option == "Total Wager (High to Low)":
+            positions.sort(key=lambda x: (-x.get('total_wager', 0), x['market_name']))
+        elif sort_option == "Total Wager (Low to High)":
+            positions.sort(key=lambda x: (x.get('total_wager', 0), x['market_name']))
+        elif sort_option == "Market Name (A-Z)":
+            positions.sort(key=lambda x: x['market_name'])
+        
         # Get all wallet labels
         all_wallet_labels = set()
         for market in positions:
