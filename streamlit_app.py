@@ -99,14 +99,18 @@ def save_wallets(wallets):
         json.dump(wallets, f, indent=2)
     st.session_state.wallets = wallets
 
-def fetch_market_name(condition_id):
-    """Fetch market name from Polymarket API using condition ID"""
+def fetch_market_info(condition_id):
+    """Fetch market name and event date from Polymarket API using condition ID"""
     if not condition_id:
-        return 'Unknown Market'
+        return {'name': 'Unknown Market', 'date': None}
     
     # Check cache first
-    if condition_id in st.session_state.market_cache:
-        return st.session_state.market_cache[condition_id]
+    cache_key = f"{condition_id}_info"
+    if cache_key in st.session_state.market_cache:
+        return st.session_state.market_cache[cache_key]
+    
+    market_name = None
+    event_date = None
     
     # Try Data API first
     try:
@@ -115,20 +119,24 @@ def fetch_market_name(condition_id):
         response = requests.get(url, params=params, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            market_name = None
+            event_data = None
             if isinstance(data, list) and len(data) > 0:
                 event_data = data[0]
-                market_name = event_data.get('title') or event_data.get('question') or event_data.get('slug')
             elif isinstance(data, dict):
                 if 'data' in data and isinstance(data['data'], list) and len(data['data']) > 0:
                     event_data = data['data'][0]
-                    market_name = event_data.get('title') or event_data.get('question') or event_data.get('slug')
                 else:
-                    market_name = data.get('title') or data.get('question') or data.get('slug')
+                    event_data = data
+            
+            if event_data:
+                market_name = event_data.get('title') or event_data.get('question') or event_data.get('slug')
+                # Try to get event date
+                event_date = event_data.get('endDate') or event_data.get('startDate') or event_data.get('date') or event_data.get('eventDate')
             
             if market_name and market_name != 'Unknown Market':
-                st.session_state.market_cache[condition_id] = market_name
-                return market_name
+                result = {'name': market_name, 'date': event_date}
+                st.session_state.market_cache[cache_key] = result
+                return result
     except Exception:
         pass
     
@@ -140,16 +148,24 @@ def fetch_market_name(condition_id):
             data = response.json()
             if isinstance(data, dict):
                 market_name = data.get('question') or data.get('title') or data.get('slug')
+                event_date = data.get('endDate') or data.get('startDate') or data.get('endDateISO') or data.get('startDateISO')
                 if market_name and market_name != 'Unknown Market':
-                    st.session_state.market_cache[condition_id] = market_name
-                    return market_name
+                    result = {'name': market_name, 'date': event_date}
+                    st.session_state.market_cache[cache_key] = result
+                    return result
     except Exception:
         pass
     
     # Fallback to shortened condition_id
     short_id = condition_id[:16] + '...' if len(condition_id) > 16 else condition_id
-    st.session_state.market_cache[condition_id] = short_id
-    return short_id
+    result = {'name': short_id, 'date': None}
+    st.session_state.market_cache[cache_key] = result
+    return result
+
+def fetch_market_name(condition_id):
+    """Fetch market name (backward compatibility)"""
+    info = fetch_market_info(condition_id)
+    return info['name']
 
 def fetch_polymarket_trades(wallet_address):
     """Fetch trades from Polymarket API for a given wallet address"""
@@ -171,18 +187,25 @@ def fetch_polymarket_trades(wallet_address):
         elif isinstance(data, dict) and 'trades' in data:
             trades = data['trades']
         
-        # Enrich trades with market names
+        # Enrich trades with market names and dates
         for trade in trades:
             condition_id = trade.get('conditionId') or trade.get('condition_id') or trade.get('market')
             market_name = trade.get('marketName') or trade.get('market_name') or trade.get('question') or trade.get('title')
+            market_date = trade.get('eventDate') or trade.get('endDate') or trade.get('startDate')
             
             if condition_id:
                 trade['condition_id'] = condition_id
-                if not market_name:
-                    market_name = fetch_market_name(condition_id)
+                if not market_name or not market_date:
+                    market_info = fetch_market_info(condition_id)
+                    if not market_name:
+                        market_name = market_info['name']
+                    if not market_date:
+                        market_date = market_info['date']
                 trade['market_name'] = market_name
+                trade['market_date'] = market_date
             elif market_name:
                 trade['market_name'] = market_name
+                trade['market_date'] = market_date
         
         return trades
     except Exception as e:
@@ -265,41 +288,71 @@ def get_all_positions():
             market_name = trade.get('market_name') or trade.get('market') or trade.get('conditionId') or trade.get('condition_id') or 'Unknown Market'
             condition_id = trade.get('condition_id') or trade.get('conditionId') or trade.get('market')
             outcome = trade.get('outcome') or trade.get('outcomeName', 'Unknown')
+            market_date = trade.get('market_date')
             
             if market_name not in market_outcome_trades:
-                market_outcome_trades[market_name] = {}
+                market_outcome_trades[market_name] = {'date': market_date, 'outcomes': {}}
             
-            if outcome not in market_outcome_trades[market_name]:
-                market_outcome_trades[market_name][outcome] = []
+            if outcome not in market_outcome_trades[market_name]['outcomes']:
+                market_outcome_trades[market_name]['outcomes'][outcome] = []
             
             trade['wallet_address'] = wallet_address
             trade['wallet_label'] = wallet_label
             trade['condition_id'] = condition_id
-            market_outcome_trades[market_name][outcome].append(trade)
+            market_outcome_trades[market_name]['outcomes'][outcome].append(trade)
         
         # Aggregate positions for each market
-        for market_name, outcome_trades in market_outcome_trades.items():
+        for market_name, market_data in market_outcome_trades.items():
             if market_name not in markets_dict:
-                markets_dict[market_name] = {}
+                markets_dict[market_name] = {'date': market_data.get('date'), 'wallets': {}}
             
             outcome_positions = {}
-            for outcome, trades_list in outcome_trades.items():
+            for outcome, trades_list in market_data['outcomes'].items():
                 position = aggregate_position(trades_list)
                 if position:
                     outcome_positions[outcome] = position
             
             if outcome_positions:
                 best_outcome = max(outcome_positions.items(), key=lambda x: x[1]['total_cost'])
-                markets_dict[market_name][wallet_label] = best_outcome[1]
+                markets_dict[market_name]['wallets'][wallet_label] = best_outcome[1]
     
-    # Convert to list format
+    # Convert to list format and filter by date
     markets_list = []
-    for market_name, wallet_positions in markets_dict.items():
-        markets_list.append({
-            'market_name': market_name,
-            'wallets': wallet_positions,
-            'wallet_count': len(wallet_positions)
-        })
+    today = datetime.now().date()
+    
+    for market_name, market_data in markets_dict.items():
+        wallet_positions = market_data.get('wallets', {})
+        market_date_str = market_data.get('date')
+        
+        # Parse date and filter - only include today or future
+        include_market = True
+        if market_date_str:
+            try:
+                # Try parsing ISO format or common date formats
+                if isinstance(market_date_str, (int, float)):
+                    # Unix timestamp
+                    market_date = datetime.fromtimestamp(market_date_str / 1000 if market_date_str > 1e10 else market_date_str).date()
+                elif 'T' in str(market_date_str):
+                    # ISO format with time
+                    market_date = datetime.fromisoformat(str(market_date_str).replace('Z', '+00:00')).date()
+                else:
+                    # Try other formats
+                    market_date = datetime.strptime(str(market_date_str), '%Y-%m-%d').date()
+                
+                # Only include if date is today or later
+                if market_date < today:
+                    include_market = False
+            except Exception:
+                # If we can't parse the date, include it (better to show than hide)
+                pass
+        
+        if include_market:
+            markets_list.append({
+                'market_name': market_name,
+                'market_date': market_date_str,
+                'wallets': wallet_positions,
+                'wallet_count': len(wallet_positions)
+            })
     
     # Calculate total wager (sum of all wallet positions' total_cost) for each market
     for market in markets_list:
@@ -511,4 +564,5 @@ else:
                     if highlight_style:
                         st.markdown('</div>', unsafe_allow_html=True)
                     st.divider()
+
 
