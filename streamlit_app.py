@@ -3,6 +3,7 @@ import requests
 import json
 import os
 import pandas as pd
+import re
 from datetime import datetime
 
 # Page config
@@ -58,40 +59,71 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# File to store wallet addresses
+# Hardcoded wallet addresses to track
+HARDCODED_WALLETS = [
+    {'address': '0x16b29c50f2439faf627209b2ac0c7bbddaa8a881', 'label': 'Freedom'},
+    #{'address': '0xee613b3fc183ee44f9da9c05f53e2da107e3debf', 'label': 'Quantbet'},#
+    {'address': '0x91654fd592ea5339fc0b1b2f2b30bfffa5e75b98', 'label': 'ST'},
+    {'address': '0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee', 'label': 'Kyle/Ray'},
+    {'address': '0x14964aefa2cd7caff7878b3820a690a03c5aa429', 'label': 'GMPM'},
+    {'address': '0x2c57db9e442ef5ffb2651f03afd551171738c94d', 'label': 'ZeroOptimist'},
+    {'address': '0x9f138019d5481fdc5c59b93b0ae4b9b817cce0fd', 'label': 'Bienville'},
+    # Add more wallets here as needed
+    # {'address': '0x...', 'label': 'WalletName'},
+]
+
+# File to store wallet addresses (for additional wallets added via UI)
 DATA_DIR = os.path.expanduser('~/.sharpscout')
 WALLETS_FILE = os.path.join(DATA_DIR, 'wallets.json')
 
 # Create data directory if it doesn't exist
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Initialize session state
+# Initialize session state with hardcoded wallets
 if 'wallets' not in st.session_state:
-    # Load wallets from file on first run
+    # Start with hardcoded wallets
+    st.session_state.wallets = HARDCODED_WALLETS.copy()
+    
+    # Also load any additional wallets from file
     if os.path.exists(WALLETS_FILE):
         with open(WALLETS_FILE, 'r') as f:
             wallets_data = json.load(f)
             # Convert old format (list of strings) to new format (list of dicts)
             if wallets_data and isinstance(wallets_data[0], str):
-                st.session_state.wallets = [{'address': addr, 'label': ''} for addr in wallets_data]
+                file_wallets = [{'address': addr, 'label': ''} for addr in wallets_data]
             else:
-                st.session_state.wallets = wallets_data
-    else:
-        st.session_state.wallets = []
+                file_wallets = wallets_data
+            
+            # Add file wallets that aren't already in hardcoded list
+            hardcoded_addresses = {w['address'].lower() for w in HARDCODED_WALLETS}
+            for wallet in file_wallets:
+                if wallet.get('address', '').lower() not in hardcoded_addresses:
+                    st.session_state.wallets.append(wallet)
 
 if 'market_cache' not in st.session_state:
     st.session_state.market_cache = {}
 
 def load_wallets():
-    """Load wallet addresses from file"""
+    """Load wallet addresses - combines hardcoded and file wallets"""
+    wallets = HARDCODED_WALLETS.copy()
+    
+    # Add wallets from file that aren't already in hardcoded list
     if os.path.exists(WALLETS_FILE):
         with open(WALLETS_FILE, 'r') as f:
-            wallets = json.load(f)
+            file_wallets_data = json.load(f)
             # Convert old format (list of strings) to new format (list of dicts)
-            if wallets and isinstance(wallets[0], str):
-                return [{'address': addr, 'label': ''} for addr in wallets]
-            return wallets
-    return []
+            if file_wallets_data and isinstance(file_wallets_data[0], str):
+                file_wallets = [{'address': addr, 'label': ''} for addr in file_wallets_data]
+            else:
+                file_wallets = file_wallets_data
+            
+            # Add file wallets that aren't already in hardcoded list
+            hardcoded_addresses = {w['address'].lower() for w in HARDCODED_WALLETS}
+            for wallet in file_wallets:
+                if wallet.get('address', '').lower() not in hardcoded_addresses:
+                    wallets.append(wallet)
+    
+    return wallets
 
 def save_wallets(wallets):
     """Save wallet addresses to file"""
@@ -99,17 +131,90 @@ def save_wallets(wallets):
         json.dump(wallets, f, indent=2)
     st.session_state.wallets = wallets
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes (shorter for price data)
+@st.cache_data(ttl=60)  # Cache for 1 minute (short to catch resolved markets quickly)
 def fetch_market_info_cached(condition_id):
-    """Fetch market name, event date, and current prices from Polymarket API (cached)"""
+    """Fetch market name, event date, current prices, and resolved status from Polymarket API (cached)"""
     if not condition_id:
-        return {'name': 'Unknown Market', 'date': None, 'prices': {}}
+        return {'name': 'Unknown Market', 'date': None, 'prices': {}, 'resolved': False}
     
     market_name = None
     event_date = None
     outcome_prices = {}
+    is_resolved = False
     
-    # Try Data API first (faster)
+    # Try CLOB API first (most reliable for closed/resolved status)
+    try:
+        url = f"https://clob.polymarket.com/markets/{condition_id}"
+        response = requests.get(url, params={}, timeout=3)
+        if response.status_code == 200:
+            market = response.json()
+            market_name = market.get('question') or market.get('title')
+            event_date = market.get('end_date_iso') or market.get('game_start_time')
+            
+            # Check closed status - this is the key field!
+            is_resolved = market.get('closed', False) is True
+            if not is_resolved:
+                is_resolved = market.get('archived', False) is True
+            if not is_resolved:
+                is_resolved = market.get('accepting_orders', True) is False
+            
+            # Get outcome prices from tokens
+            if 'tokens' in market:
+                for token in market['tokens']:
+                    outcome_name = token.get('outcome') or token.get('title')
+                    price = token.get('price')
+                    if outcome_name is not None and price is not None:
+                        try:
+                            outcome_prices[outcome_name] = float(price)
+                            # Also check if price indicates resolution
+                            if float(price) <= 0.05 or float(price) >= 0.95:
+                                is_resolved = True
+                        except (ValueError, TypeError):
+                            pass
+            
+            # Return if we got data
+            if market_name or outcome_prices:
+                return {'name': market_name, 'date': event_date, 'prices': outcome_prices, 'resolved': is_resolved}
+    except Exception:
+        pass
+    
+    # Try markets endpoint as fallback
+    try:
+        url = "https://data-api.polymarket.com/markets"
+        params = {'conditionId': condition_id}
+        response = requests.get(url, params=params, timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            markets = data if isinstance(data, list) else (data.get('data', []) if isinstance(data, dict) else [])
+            if markets and len(markets) > 0:
+                market = markets[0]
+                if not market_name:
+                    market_name = market.get('question') or market.get('title') or market.get('slug')
+                if not event_date:
+                    event_date = market.get('endDate') or market.get('startDate') or market.get('date')
+                
+                # Check resolved status
+                if not is_resolved:
+                    is_resolved = market.get('resolved', False) is True
+                if not is_resolved:
+                    is_resolved = market.get('active', True) is False
+                
+                # Get outcome prices from tokens
+                if 'tokens' in market and not outcome_prices:
+                    for token in market['tokens']:
+                        outcome_name = token.get('outcome') or token.get('title') or token.get('name')
+                        price = token.get('price') or token.get('lastPrice') or token.get('currentPrice') or token.get('lastPriceUsd')
+                        if outcome_name and price is not None:
+                            try:
+                                outcome_prices[outcome_name] = float(price)
+                                if float(price) <= 0.05 or float(price) >= 0.95:
+                                    is_resolved = True
+                            except (ValueError, TypeError):
+                                pass
+    except Exception:
+        pass
+    
+    # Fallback to events endpoint
     try:
         url = "https://data-api.polymarket.com/events"
         params = {'conditionId': condition_id}
@@ -126,8 +231,14 @@ def fetch_market_info_cached(condition_id):
                     event_data = data
             
             if event_data:
-                market_name = event_data.get('title') or event_data.get('question') or event_data.get('slug')
-                event_date = event_data.get('endDate') or event_data.get('startDate') or event_data.get('date') or event_data.get('eventDate')
+                if not market_name:
+                    market_name = event_data.get('title') or event_data.get('question') or event_data.get('slug')
+                if not event_date:
+                    event_date = event_data.get('endDate') or event_data.get('startDate') or event_data.get('date') or event_data.get('eventDate')
+                
+                # Check resolved status
+                if not is_resolved:
+                    is_resolved = event_data.get('resolved', False) is True
                 
                 # Get outcome prices if available
                 if 'outcomes' in event_data:
@@ -135,38 +246,19 @@ def fetch_market_info_cached(condition_id):
                         outcome_name = outcome.get('title') or outcome.get('name')
                         price = outcome.get('price') or outcome.get('lastPrice') or outcome.get('currentPrice')
                         if outcome_name and price is not None:
-                            outcome_prices[outcome_name] = float(price)
-            
-            if market_name and market_name != 'Unknown Market':
-                return {'name': market_name, 'date': event_date, 'prices': outcome_prices}
-    except Exception:
-        pass
-    
-    # Try to get prices from markets endpoint
-    try:
-        url = f"https://data-api.polymarket.com/markets"
-        params = {'conditionId': condition_id}
-        response = requests.get(url, params=params, timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            markets = data if isinstance(data, list) else (data.get('data', []) if isinstance(data, dict) else [])
-            if markets:
-                market = markets[0]
-                if not market_name:
-                    market_name = market.get('question') or market.get('title')
-                # Get outcome prices
-                if 'tokens' in market:
-                    for token in market['tokens']:
-                        outcome_name = token.get('outcome') or token.get('title')
-                        price = token.get('price') or token.get('lastPrice')
-                        if outcome_name and price is not None:
-                            outcome_prices[outcome_name] = float(price)
+                            try:
+                                outcome_prices[outcome_name] = float(price)
+                            except (ValueError, TypeError):
+                                pass
     except Exception:
         pass
     
     # Fallback to shortened condition_id
-    short_id = condition_id[:16] + '...' if len(condition_id) > 16 else condition_id
-    return {'name': short_id, 'date': None, 'prices': {}}
+    if not market_name:
+        short_id = condition_id[:16] + '...' if len(condition_id) > 16 else condition_id
+        market_name = short_id
+    
+    return {'name': market_name, 'date': event_date, 'prices': outcome_prices, 'resolved': is_resolved}
 
 def fetch_market_info(condition_id):
     """Fetch market info with session cache layer"""
@@ -210,7 +302,7 @@ def fetch_polymarket_trades_cached(wallet_address):
             'user': wallet_address,
             'limit': 100
         }
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(url, params=params, timeout=8)  # Reduced timeout
         response.raise_for_status()
         data = response.json()
         
@@ -226,86 +318,117 @@ def fetch_polymarket_trades_cached(wallet_address):
     except Exception as e:
         return []
 
+def extract_date_from_event_slug(event_slug):
+    """Extract date from eventSlug (e.g., 'nhl-nj-ott-2025-12-10' -> '2025-12-10')"""
+    if not event_slug:
+        return None
+    try:
+        # Event slug format: sport-team1-team2-YYYY-MM-DD or similar
+        # Look for YYYY-MM-DD pattern
+        import re
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', event_slug)
+        if date_match:
+            return date_match.group(1)
+    except Exception:
+        pass
+    return None
+
 def fetch_polymarket_trades(wallet_address):
-    """Fetch trades and enrich with market info"""
+    """Fetch trades and filter by today or future dates from eventSlug"""
     trades = fetch_polymarket_trades_cached(wallet_address)
     
     if not trades:
         return []
     
-    # Batch fetch market info for unique condition IDs only
-    unique_condition_ids = set()
-    for trade in trades:
-        condition_id = trade.get('conditionId') or trade.get('condition_id') or trade.get('market')
-        if condition_id:
-            unique_condition_ids.add(condition_id)
+    # Get today's date in YYYY-MM-DD format
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    today_date = datetime.now().date()
     
-    # Pre-fetch market info for all unique condition IDs
-    market_info_cache = {}
-    for condition_id in unique_condition_ids:
-        market_info_cache[condition_id] = fetch_market_info(condition_id)
-    
-    # Enrich trades with market names and dates
+    # Filter trades to only include today's or future games using eventSlug
+    active_trades = []
     for trade in trades:
+        event_slug = trade.get('eventSlug') or trade.get('eventSlug')
+        if event_slug:
+            event_date_str = extract_date_from_event_slug(event_slug)
+            if event_date_str:
+                try:
+                    event_date = datetime.strptime(event_date_str, '%Y-%m-%d').date()
+                    # Only include if event date is today or in the future
+                    if event_date >= today_date:
+                        active_trades.append(trade)
+                except Exception:
+                    # If date parsing fails, exclude it (safer)
+                    pass
+        else:
+            # If no eventSlug, exclude it (safer - we can't verify the date)
+            pass
+    
+    # Use title directly from trades response (already available!)
+    for trade in active_trades:
         condition_id = trade.get('conditionId') or trade.get('condition_id') or trade.get('market')
-        market_name = trade.get('marketName') or trade.get('market_name') or trade.get('question') or trade.get('title')
-        market_date = trade.get('eventDate') or trade.get('endDate') or trade.get('startDate')
-        
-        if condition_id and condition_id in market_info_cache:
-            market_info = market_info_cache[condition_id]
-            if not market_name:
-                market_name = market_info['name']
-            if not market_date:
-                market_date = market_info['date']
+        market_name = trade.get('title') or trade.get('marketName') or trade.get('market_name') or 'Unknown Market'
+        event_slug = trade.get('eventSlug', '')
         
         trade['condition_id'] = condition_id
-        trade['market_name'] = market_name or 'Unknown Market'
-        trade['market_date'] = market_date
+        trade['market_name'] = market_name
+        trade['market_date'] = extract_date_from_event_slug(event_slug)  # Extract date from slug
     
-    return trades
+    return active_trades
 
 def aggregate_position(trades):
-    """Aggregate trades into a single position with avg cost and total cost"""
+    """Aggregate trades into a single position with improved position recognition"""
     if not trades:
         return None
     
     total_shares = 0
     total_cost = 0
     outcomes = set()
+    buy_trades = []
+    sell_trades = []
     
     for trade in trades:
-        amount = float(trade.get('amount', 0) or trade.get('size', 0) or trade.get('quantity', 0) or 0)
+        # Use 'size' field directly from API (more reliable)
+        amount = float(trade.get('size', 0) or trade.get('amount', 0) or trade.get('quantity', 0) or 0)
         if amount == 0:
             continue
             
+        # Use 'price' field directly from API
         price = float(trade.get('price', 0) or trade.get('priceNum', 0) or trade.get('fillPrice', 0) or 0)
-        side = (trade.get('side', '') or trade.get('type', '') or '').lower()
-        is_maker = trade.get('isMaker', False)
-        outcome = trade.get('outcome') or trade.get('outcomeName', 'Unknown')
+        if price == 0:
+            continue
+        
+        # Use 'side' field directly from API - it's explicitly "BUY" or "SELL"
+        side = (trade.get('side', '') or '').upper()
+        outcome = trade.get('outcome') or trade.get('outcomeName') or trade.get('outcomeTitle') or 'Unknown'
         outcomes.add(outcome)
         
-        is_buy = False
-        if side in ['buy', 'b', 'long', 'bid']:
-            is_buy = True
-        elif side in ['sell', 's', 'short', 'ask', 'ask_order']:
-            is_buy = False
-        elif is_maker:
-            is_buy = True
-        else:
-            is_buy = True
+        # Determine buy/sell from explicit side field
+        is_buy = side == 'BUY'
         
+        # Track trades separately for better analysis
         if is_buy:
+            buy_trades.append({'amount': amount, 'price': price})
             total_shares += amount
             total_cost += amount * price
         else:
+            sell_trades.append({'amount': amount, 'price': price})
             total_shares -= amount
-            total_cost -= amount * price
+            total_cost -= amount * price  # Selling reduces cost basis
     
+    # Only return position if there are net shares
     if abs(total_shares) < 0.0001:
         return None
     
+    # Calculate weighted average cost
     avg_cost = total_cost / total_shares if total_shares != 0 else 0
-    outcome_str = ', '.join(sorted(outcomes)) if len(outcomes) > 0 else 'Unknown'
+    
+    # Get most common outcome or combine if multiple
+    if len(outcomes) == 1:
+        outcome_str = list(outcomes)[0]
+    elif len(outcomes) > 1:
+        outcome_str = ', '.join(sorted(outcomes))
+    else:
+        outcome_str = 'Unknown'
     
     return {
         'outcome': outcome_str,
@@ -313,27 +436,28 @@ def aggregate_position(trades):
         'avg_cost_per_share': avg_cost,
         'total_cost': abs(total_cost),
         'position_type': 'Long' if total_shares > 0 else 'Short',
-        'trade_count': len(trades)
+        'trade_count': len(trades),
+        'buy_count': len(buy_trades),
+        'sell_count': len(sell_trades)
     }
 
 def get_all_positions():
-    """Fetch and aggregate positions from all wallets"""
-    wallets = st.session_state.wallets if st.session_state.wallets else []
+    """Fetch and aggregate positions from all wallets with progress indicator"""
+    # Always use hardcoded wallets + any from session state
+    wallets = st.session_state.wallets if st.session_state.wallets else load_wallets()
     if not wallets:
         return []
     
-    return get_all_positions_cached(wallets)
-
-@st.cache_data(ttl=60)  # Cache positions for 1 minute (shorter to catch resolved markets faster)
-def get_all_positions_cached(wallets_list):
-    """Fetch and aggregate positions from all wallets (cached)"""
-    wallets = wallets_list
-    if not wallets:
-        return []
+    # Show progress
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
+    total_wallets = len(wallets)
     markets_dict = {}
     
-    for wallet_obj in wallets:
+    # Fetch trades for each wallet with progress
+    all_trades_by_wallet = {}
+    for idx, wallet_obj in enumerate(wallets):
         if isinstance(wallet_obj, dict):
             wallet_address = wallet_obj['address']
             wallet_label = wallet_obj.get('label', wallet_address[:10])
@@ -341,18 +465,113 @@ def get_all_positions_cached(wallets_list):
             wallet_address = wallet_obj
             wallet_label = wallet_address[:10]
         
+        status_text.text(f"Fetching trades for {wallet_label}... ({idx+1}/{total_wallets})")
+        progress_bar.progress((idx + 0.2) / total_wallets)
+        
         trades = fetch_polymarket_trades(wallet_address)
+        all_trades_by_wallet[wallet_label] = {
+            'address': wallet_address,
+            'trades': trades
+        }
+    
+    # Collect all unique condition IDs for price checking
+    status_text.text("Checking market prices...")
+    progress_bar.progress(0.5)
+    
+    all_condition_ids = set()
+    for wallet_label, wallet_data in all_trades_by_wallet.items():
+        trades = wallet_data['trades']
+        for trade in trades:
+            condition_id = trade.get('condition_id') or trade.get('conditionId')
+            if condition_id:
+                all_condition_ids.add(condition_id)
+    
+    # Batch check prices for resolved markets (price <= 5c or >= 95c)
+    resolved_condition_ids = set()
+    market_info_cache = {}
+    
+    for condition_id in all_condition_ids:
+        market_info = fetch_market_info(condition_id)
+        market_info_cache[condition_id] = market_info
+        
+        # Check if market is resolved
+        is_resolved = False
+        
+        # First check explicit resolved status
+        if market_info.get('resolved', False) is True:
+            is_resolved = True
+        
+        # Then check prices - if ANY outcome price is <= 5c or >= 95c, market is resolved
+        prices = market_info.get('prices', {})
+        if prices:
+            for outcome_name, price in prices.items():
+                try:
+                    price_float = float(price)
+                    if price_float <= 0.05 or price_float >= 0.95:
+                        is_resolved = True
+                        break
+                except (ValueError, TypeError):
+                    continue
+        
+        # If still not resolved and no prices, try CLOB API as fallback (most reliable)
+        if not is_resolved and not prices:
+            try:
+                url = f"https://clob.polymarket.com/markets/{condition_id}"
+                response = requests.get(url, timeout=2)
+                if response.status_code == 200:
+                    market = response.json()
+                    # Check closed status - this is the definitive field
+                    if market.get('closed') is True:
+                        is_resolved = True
+                    elif market.get('archived') is True:
+                        is_resolved = True
+                    elif market.get('accepting_orders') is False:
+                        is_resolved = True
+                    # Also check token prices
+                    if 'tokens' in market:
+                        for token in market['tokens']:
+                            price = token.get('price')
+                            if price is not None:
+                                try:
+                                    price_float = float(price)
+                                    if price_float <= 0.05 or price_float >= 0.95:
+                                        is_resolved = True
+                                        break
+                                except (ValueError, TypeError):
+                                    continue
+            except Exception:
+                pass
+        
+        if is_resolved:
+            resolved_condition_ids.add(condition_id)
+    
+    # Now process only active markets (already filtered by date via eventSlug, now filter by price)
+    status_text.text("Processing active positions...")
+    progress_bar.progress(0.7)
+    
+    for wallet_label, wallet_data in all_trades_by_wallet.items():
+        wallet_address = wallet_data['address']
+        trades = wallet_data['trades']
+        
+        # Filter out trades from resolved markets
+        active_trades = [
+            trade for trade in trades
+            if (trade.get('condition_id') or trade.get('conditionId') or trade.get('market')) not in resolved_condition_ids
+        ]
+        
+        if not active_trades:
+            continue
         
         # Group trades by market and outcome
         market_outcome_trades = {}
-        for trade in trades:
+        for trade in active_trades:
             market_name = trade.get('market_name') or trade.get('market') or trade.get('conditionId') or trade.get('condition_id') or 'Unknown Market'
             condition_id = trade.get('condition_id') or trade.get('conditionId') or trade.get('market')
             outcome = trade.get('outcome') or trade.get('outcomeName', 'Unknown')
             market_date = trade.get('market_date')
             
             if market_name not in market_outcome_trades:
-                market_outcome_trades[market_name] = {'date': market_date, 'outcomes': {}}
+                market_outcome_trades[market_name] = {'date': market_date, 'outcomes': {}, 'condition_id': condition_id}
             
             if outcome not in market_outcome_trades[market_name]['outcomes']:
                 market_outcome_trades[market_name]['outcomes'][outcome] = []
@@ -365,11 +584,12 @@ def get_all_positions_cached(wallets_list):
         # Aggregate positions for each market
         for market_name, market_data in market_outcome_trades.items():
             if market_name not in markets_dict:
+                condition_id = market_data.get('condition_id')
                 markets_dict[market_name] = {
                     'date': market_data.get('date'),
                     'wallets': {},
-                    'market_info': None,  # Will store market info for price checking
-                    'condition_id': None  # Store condition_id for price fetching
+                    'market_info': market_info_cache.get(condition_id) if condition_id else None,
+                    'condition_id': condition_id
                 }
             
             outcome_positions = {}
@@ -381,95 +601,19 @@ def get_all_positions_cached(wallets_list):
             if outcome_positions:
                 best_outcome = max(outcome_positions.items(), key=lambda x: x[1]['total_cost'])
                 markets_dict[market_name]['wallets'][wallet_label] = best_outcome[1]
-                
-                # Store condition_id and fetch market info for price checking
-                if not markets_dict[market_name]['market_info'] and market_data['outcomes']:
-                    first_trade = list(market_data['outcomes'].values())[0][0]
-                    condition_id = first_trade.get('condition_id')
-                    if condition_id:
-                        markets_dict[market_name]['condition_id'] = condition_id
-                        markets_dict[market_name]['market_info'] = fetch_market_info(condition_id)
     
-    # Convert to list format and filter by date
+    # Convert to list format (markets_dict already contains only active markets)
+    status_text.text("Finalizing positions...")
+    progress_bar.progress(0.9)
+    
     markets_list = []
-    today = datetime.now().date()
-    
-    # Optimized date parsing function
-    def parse_date(date_str):
-        """Quick date parsing with caching"""
-        if not date_str:
-            return None
-        try:
-            if isinstance(date_str, (int, float)):
-                return datetime.fromtimestamp(date_str / 1000 if date_str > 1e10 else date_str).date()
-            date_str = str(date_str)
-            if 'T' in date_str:
-                return datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
-            return datetime.strptime(date_str[:10], '%Y-%m-%d').date()
-        except Exception:
-            return None
     
     for market_name, market_data in markets_dict.items():
         wallet_positions = market_data.get('wallets', {})
         market_date_str = market_data.get('date')
-        market_info = market_data.get('market_info', {})
-        condition_id = market_data.get('condition_id')
         
-        # Check if market is resolved based on prices
-        is_resolved = False
-        
-        # If we don't have market_info yet, try to fetch it
-        if not market_info and condition_id:
-            market_info = fetch_market_info(condition_id)
-            market_data['market_info'] = market_info
-        
-        if market_info:
-            prices = market_info.get('prices', {})
-            # If we have prices, check if any outcome price indicates resolution
-            if prices:
-                # If any outcome price is < 0.01 or > 0.99, market is resolved
-                for outcome_name, price in prices.items():
-                    try:
-                        price_float = float(price)
-                        if price_float < 0.01 or price_float > 0.99:
-                            is_resolved = True
-                            break
-                    except (ValueError, TypeError):
-                        continue
-        
-        # If still no prices, try direct markets API call as fallback
-        if not is_resolved and condition_id and (not market_info or not market_info.get('prices')):
-            try:
-                url = "https://data-api.polymarket.com/markets"
-                params = {'conditionId': condition_id}
-                response = requests.get(url, params=params, timeout=3)
-                if response.status_code == 200:
-                    data = response.json()
-                    markets = data if isinstance(data, list) else (data.get('data', []) if isinstance(data, dict) else [])
-                    if markets:
-                        market = markets[0]
-                        if 'tokens' in market:
-                            for token in market['tokens']:
-                                price = token.get('price') or token.get('lastPrice') or token.get('currentPrice')
-                                if price is not None:
-                                    try:
-                                        price_float = float(price)
-                                        if price_float < 0.01 or price_float > 0.99:
-                                            is_resolved = True
-                                            break
-                                    except (ValueError, TypeError):
-                                        continue
-            except Exception:
-                pass
-        
-        # Also check date as backup filter
-        include_market = not is_resolved
-        if not is_resolved and market_date_str:
-            market_date = parse_date(market_date_str)
-            if market_date and market_date < today:
-                include_market = False
-        
-        if include_market:
+        # All markets in markets_dict are already active (filtered above)
+        if wallet_positions:
             markets_list.append({
                 'market_name': market_name,
                 'market_date': market_date_str,
@@ -477,15 +621,20 @@ def get_all_positions_cached(wallets_list):
                 'wallet_count': len(wallet_positions)
             })
     
-    # Calculate total wager (sum of all wallet positions' total_cost) for each market
+    # Calculate total wager and sort by total $ wagered (descending)
     for market in markets_list:
         total_wager = sum(pos['total_cost'] for pos in market['wallets'].values())
         market['total_wager'] = total_wager
     
-    # Sort: First by wallet_count (descending), then by total_wager (descending)
-    markets_list.sort(key=lambda x: (-x['wallet_count'], -x['total_wager']))
+    markets_list.sort(key=lambda x: -x['total_wager'])
+    
+    progress_bar.progress(1.0)
+    status_text.empty()
+    progress_bar.empty()
     
     return markets_list
+
+# Removed cached version - now using direct function with progress indicators
 
 # Main app
 st.title("📊 SharpScout")
@@ -601,7 +750,7 @@ else:
     if not positions:
         st.info("No positions found. Make sure wallets have trades and click Refresh Positions.")
     else:
-        # Positions are already sorted by wallet_count then total_wager in get_all_positions_cached
+        # Positions are already sorted by total_wager (descending) in get_all_positions
         # Get all wallet labels
         all_wallet_labels = set()
         for market in positions:
